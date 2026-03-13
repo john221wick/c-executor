@@ -1,0 +1,15 @@
+{
+  "name": "python-ml",
+  "rootfs": "/opt/executor/rootfs/python-ml",
+  "compile": null,
+  "run": ["/usr/bin/python3", "-S", "{source}"],
+  "extension": ".py",
+  "limits": {
+    "memory_mb": 2048,
+    "cpu_time_ms": 30000,
+    "wall_time_ms": 60000,
+    "max_pids": 32
+  },
+  "network": false,
+  "gpu": true
+}

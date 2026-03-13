@@ -1,0 +1,15 @@
+{
+  "name": "python-base",
+  "rootfs": "/opt/executor/rootfs/python-base",
+  "compile": null,
+  "run": ["/usr/bin/python3", "-S", "{source}"],
+  "extension": ".py",
+  "limits": {
+    "memory_mb": 256,
+    "cpu_time_ms": 5000,
+    "wall_time_ms": 15000,
+    "max_pids": 4
+  },
+  "network": false,
+  "gpu": false
+}

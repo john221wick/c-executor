@@ -1,0 +1,15 @@
+{
+  "name": "node-base",
+  "rootfs": "/opt/executor/rootfs/node-base",
+  "compile": null,
+  "run": ["/usr/bin/node", "{source}"],
+  "extension": ".js",
+  "limits": {
+    "memory_mb": 256,
+    "cpu_time_ms": 5000,
+    "wall_time_ms": 15000,
+    "max_pids": 8
+  },
+  "network": false,
+  "gpu": false
+}

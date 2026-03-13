@@ -1,0 +1,15 @@
+{
+  "name": "python-agent",
+  "rootfs": "/opt/executor/rootfs/python-agent",
+  "compile": null,
+  "run": ["/usr/bin/python3", "{source}"],
+  "extension": ".py",
+  "limits": {
+    "memory_mb": 1024,
+    "cpu_time_ms": 60000,
+    "wall_time_ms": 120000,
+    "max_pids": 16
+  },
+  "network": true,
+  "gpu": false
+}

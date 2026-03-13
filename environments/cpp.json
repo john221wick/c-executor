@@ -1,0 +1,15 @@
+{
+  "name": "cpp",
+  "rootfs": "/opt/executor/rootfs/minimal",
+  "compile": ["/usr/bin/g++", "-std=c++20", "-O2", "-o", "{output}", "{source}"],
+  "run": ["{output}"],
+  "extension": ".cpp",
+  "limits": {
+    "memory_mb": 256,
+    "cpu_time_ms": 2000,
+    "wall_time_ms": 10000,
+    "max_pids": 4
+  },
+  "network": false,
+  "gpu": false
+}
