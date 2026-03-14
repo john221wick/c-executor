@@ -1,6 +1,6 @@
 {
   "name": "python-agent",
-  "rootfs": "/opt/executor/rootfs/python-agent",
+  "rootfs": "../../test/rootfs/python-agent",
   "compile": null,
   "run": ["/usr/bin/python3", "{source}"],
   "extension": ".py",

@@ -1,6 +1,6 @@
 {
   "name": "node-base",
-  "rootfs": "/opt/executor/rootfs/node-base",
+  "rootfs": "../../test/rootfs/node-base",
   "compile": null,
   "run": ["/usr/bin/node", "{source}"],
   "extension": ".js",

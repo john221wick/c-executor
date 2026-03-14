@@ -1,6 +1,6 @@
 {
   "name": "node-fullstack",
-  "rootfs": "/opt/executor/rootfs/node-fullstack",
+  "rootfs": "../../test/rootfs/node-fullstack",
   "compile": null,
   "run": ["/usr/bin/node", "{source}"],
   "extension": ".js",

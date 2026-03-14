@@ -1,6 +1,6 @@
 {
   "name": "python-base",
-  "rootfs": "/opt/executor/rootfs/python-base",
+  "rootfs": "../../test/rootfs/python-base",
   "compile": null,
   "run": ["/usr/bin/python3", "-S", "{source}"],
   "extension": ".py",

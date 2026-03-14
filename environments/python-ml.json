@@ -1,6 +1,6 @@
 {
   "name": "python-ml",
-  "rootfs": "/opt/executor/rootfs/python-ml",
+  "rootfs": "../../test/rootfs/python-ml",
   "compile": null,
   "run": ["/usr/bin/python3", "-S", "{source}"],
   "extension": ".py",
