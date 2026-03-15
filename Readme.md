@@ -6,13 +6,37 @@ Runs untrusted code in isolated environments on Linux. No Docker.
 
 ## Why
 
-Running code inside Docker has three problems that are hard to work around:
+This project is built for online judges, agent sandboxes, and batch code
+execution where Docker is often heavier than needed.
 
-1. **Cold starts.** Every execution spins up a container. That's 200-800ms of overhead before the first line of code runs.
+1. **Higher throughput.** It is multithreaded, so one process can run many jobs
+   in parallel.
 
-2. **GPU access.** Requires nvidia-container-toolkit, exact driver version pinning, and runtime flags on every container. One version mismatch and nothing works.
+2. **Faster compile and run.** Code runs inside a prepared sandbox environment.
+   You avoid most of the startup cost of launching fresh containers.
 
-3. **Custom libraries.** Want PyTorch or NumPy? You either publish a new image or ship a bloated base with everything pre-installed. No middle ground.
+3. **Safe for untrusted code.** It still uses namespaces, seccomp, Landlock,
+   ptrace, and cgroup limits for CPU, memory, wall time, and process count.
+
+4. **Better for judge workflows.** It is built around compile/run commands,
+   stdin/stdout testing, limits, and verdicts like AC, WA, TLE, and RE.
+
+5. **Easy environment setup.** Runtimes are described with JSON files and
+   rootfs paths.
+
+6. **Reuse existing dependencies.** If Python, ML, or Node packages already
+   exist on the machine, the executor can mount them read-only and use them
+   directly.
+
+7. **No new Docker image every time.** If you need a new runtime or package set,
+   you can usually update the JSON and mounted paths instead of building and
+   pushing another image.
+
+8. **Simpler GPU use.** GPU environments can expose CUDA and NVIDIA device paths
+   and still keep the same runtime, memory, and verdict reporting flow.
+
+9. **Good for repeated workloads.** If you run many submissions, testcases, or
+   agent tasks, reusing prepared environments is usually simpler and faster.
 
 ---
 
