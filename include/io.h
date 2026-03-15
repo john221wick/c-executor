@@ -13,13 +13,17 @@
 
 #include "common.h"
 #include <expected>
+#include <optional>
 #include <string>
 #include <vector>
 
-/* Load the full input and expected-output files as one combined testcase. */
+/* Load input and expected-output files as either one combined testcase or
+ * multiple testcase slices using byte offsets. */
 std::expected<std::vector<TestCase>, int>
 split(const std::string& input_path,
-      const std::string& output_path);
+      const std::string& output_path,
+      const std::optional<std::vector<size_t>>& input_offsets = std::nullopt,
+      const std::optional<std::vector<size_t>>& output_offsets = std::nullopt);
 
 /* Compare actual stdout against expected output.
  * Trailing whitespace/newlines are stripped from both sides before comparing.

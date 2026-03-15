@@ -37,6 +37,19 @@ static std::vector<std::string> substitute(std::vector<std::string> vec,
     return vec;
 }
 
+static void resolve_command_path(const std::filesystem::path& base_dir,
+                                 std::vector<std::string>& cmd) {
+    if (cmd.empty()) return;
+
+    const std::string& program = cmd.front();
+    if (program == "{source}" || program == "{output}") return;
+
+    std::filesystem::path path(program);
+    if (!path.is_absolute() && program.find('/') != std::string::npos) {
+        cmd.front() = resolve_path(base_dir, program).string();
+    }
+}
+
 std::vector<std::string> Environment::resolved_compile_cmd(
         const std::string& source, const std::string& output) const {
     auto v = substitute(compile_cmd, "{source}", source);
@@ -79,8 +92,10 @@ static bool parse_environment(const std::filesystem::path& path,
         /* compile is nullable */
         if (!j.at("compile").is_null())
             out.compile_cmd = j.at("compile").get<std::vector<std::string>>();
+        resolve_command_path(base_dir, out.compile_cmd);
 
         out.run_cmd = j.at("run").get<std::vector<std::string>>();
+        resolve_command_path(base_dir, out.run_cmd);
 
         const auto& lim = j.at("limits");
         out.limits.memory_mb    = lim.value("memory_mb",    256ULL);

@@ -2,13 +2,13 @@
   "name": "node-base",
   "rootfs": "../../test/rootfs/node-base",
   "compile": null,
-  "run": ["/usr/bin/node", "{source}"],
+  "run": ["../../test/bin/node-real", "{source}"],
   "extension": ".js",
   "limits": {
     "memory_mb": 256,
     "cpu_time_ms": 5000,
     "wall_time_ms": 15000,
-    "max_pids": 8
+    "max_pids": 32
   },
   "network": false,
   "gpu": false

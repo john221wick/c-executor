@@ -1,0 +1,15 @@
+{
+  "name": "bash-base",
+  "rootfs": "../../test/rootfs/bash-base",
+  "compile": null,
+  "run": ["/usr/bin/bash", "{source}"],
+  "extension": ".sh",
+  "limits": {
+    "memory_mb": 128,
+    "cpu_time_ms": 5000,
+    "wall_time_ms": 15000,
+    "max_pids": 8
+  },
+  "network": false,
+  "gpu": false
+}

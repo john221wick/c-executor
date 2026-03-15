@@ -152,7 +152,7 @@ public:
         namespace fs = std::filesystem;
 
         /* 1. Work directory */
-        std::string work_dir = std::string(SANDBOX_ROOT) + "/task_"
+        std::string work_dir = sandbox_root() + "/task_"
                                + std::to_string(tc.id) + "_"
                                + std::to_string(getpid());
         fs::create_directories(work_dir);
@@ -190,7 +190,10 @@ public:
         }
 
         /* 2. Cgroup */
-        auto cgroup = CgroupGuard::create("task_" + std::to_string(tc.id), env_.limits);
+        auto cgroup = CgroupGuard::create(
+            "task_" + std::to_string(tc.id) + "_" + std::to_string(getpid()),
+            env_.limits
+        );
         if (!cgroup) {
             Logger::instance().error(
                 "failed to create cgroup: " + std::string(strerror(cgroup.error()))

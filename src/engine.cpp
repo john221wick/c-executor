@@ -16,6 +16,7 @@
 #include "sandbox.h"
 #include "logger.h"
 #include "common.h"
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
@@ -49,8 +50,9 @@ public:
         if (env_.needs_compilation()) {
             /* We expect test_cases to carry the source path via a side channel.
              * Convention: source_path_ is set by the caller before run(). */
-            fs::create_directories(SANDBOX_ROOT);
-            std::string out_binary = std::string(SANDBOX_ROOT) + "/compiled_"
+            const std::string sandbox_dir = sandbox_root();
+            fs::create_directories(sandbox_dir);
+            std::string out_binary = sandbox_dir + "/compiled_"
                                      + std::to_string(getpid());
 
             auto argv_vec = env_.resolved_compile_cmd(source_path_, out_binary);

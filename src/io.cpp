@@ -59,7 +59,9 @@ static std::expected<std::string_view, int> load_file(const std::string& path) {
 
 std::expected<std::vector<TestCase>, int>
 split(const std::string& input_path,
-      const std::string& output_path)
+      const std::string& output_path,
+      const std::optional<std::vector<size_t>>& input_offsets,
+      const std::optional<std::vector<size_t>>& output_offsets)
 {
     auto in_view  = load_file(input_path);
     if (!in_view)  return std::unexpected(in_view.error());
@@ -67,11 +69,62 @@ split(const std::string& input_path,
     auto out_view = load_file(output_path);
     if (!out_view) return std::unexpected(out_view.error());
 
-    return std::vector<TestCase>{TestCase{
-        .id              = 0,
-        .input           = *in_view,
-        .expected_output = *out_view,
-    }};
+    if (!input_offsets && !output_offsets) {
+        return std::vector<TestCase>{TestCase{
+            .id              = 0,
+            .input           = *in_view,
+            .expected_output = *out_view,
+        }};
+    }
+
+    if (!input_offsets || !output_offsets) {
+        return std::unexpected(EINVAL);
+    }
+
+    const auto split_by_offsets = [](std::string_view data,
+                                     const std::vector<size_t>& offsets)
+        -> std::expected<std::vector<std::string_view>, int> {
+        if (offsets.empty()) return std::unexpected(EINVAL);
+
+        std::vector<std::string_view> parts;
+        parts.reserve(offsets.size());
+
+        for (size_t i = 0; i < offsets.size(); ++i) {
+            const size_t begin = offsets[i];
+            const size_t end =
+                (i + 1 < offsets.size()) ? offsets[i + 1] : data.size();
+
+            if (begin > end || end > data.size()) {
+                return std::unexpected(EINVAL);
+            }
+
+            parts.push_back(data.substr(begin, end - begin));
+        }
+
+        return parts;
+    };
+
+    auto input_parts = split_by_offsets(*in_view, *input_offsets);
+    if (!input_parts) return std::unexpected(input_parts.error());
+
+    auto output_parts = split_by_offsets(*out_view, *output_offsets);
+    if (!output_parts) return std::unexpected(output_parts.error());
+
+    if (input_parts->size() != output_parts->size()) {
+        return std::unexpected(EINVAL);
+    }
+
+    std::vector<TestCase> cases;
+    cases.reserve(input_parts->size());
+    for (size_t i = 0; i < input_parts->size(); ++i) {
+        cases.push_back(TestCase{
+            .id              = static_cast<uint32_t>(i),
+            .input           = (*input_parts)[i],
+            .expected_output = (*output_parts)[i],
+        });
+    }
+
+    return cases;
 }
 
 /* ── compare() ──────────────────────────────────────────────────────────── */

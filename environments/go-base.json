@@ -1,0 +1,15 @@
+{
+  "name": "go-base",
+  "rootfs": "../../test/rootfs/go-base",
+  "compile": ["../../test/bin/go", "build", "-o", "{output}", "{source}"],
+  "run": ["{output}"],
+  "extension": ".go",
+  "limits": {
+    "memory_mb": 256,
+    "cpu_time_ms": 5000,
+    "wall_time_ms": 15000,
+    "max_pids": 32
+  },
+  "network": false,
+  "gpu": false
+}

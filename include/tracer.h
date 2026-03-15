@@ -21,6 +21,7 @@
 #include <expected>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 #include <sys/types.h>
 #include <sys/user.h>
@@ -129,4 +130,5 @@ private:
     TracerPolicy* policy_;
     uint64_t      wall_timeout_ns_;
     bool          attached_ = true;
+    std::unordered_set<pid_t> tracees_;
 };

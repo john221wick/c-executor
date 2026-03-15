@@ -17,10 +17,12 @@
 #include "io.h"
 #include "logger.h"
 #include "common.h"
+#include <charconv>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -80,12 +82,51 @@ static bool enable_cgroup_controllers(const std::filesystem::path& root_path,
     return true;
 }
 
+static std::expected<std::vector<size_t>, std::string>
+parse_offsets_csv(std::string_view raw_offsets) {
+    if (raw_offsets.empty()) {
+        return std::unexpected("offset list is empty");
+    }
+
+    std::vector<size_t> offsets;
+    size_t cursor = 0;
+
+    while (cursor <= raw_offsets.size()) {
+        const size_t comma = raw_offsets.find(',', cursor);
+        const size_t end =
+            (comma == std::string_view::npos) ? raw_offsets.size() : comma;
+        const std::string_view token = raw_offsets.substr(cursor, end - cursor);
+        if (token.empty()) {
+            return std::unexpected("offset list contains an empty item");
+        }
+
+        size_t value = 0;
+        auto [ptr, ec] = std::from_chars(
+            token.data(),
+            token.data() + token.size(),
+            value
+        );
+        if (ec != std::errc{} || ptr != token.data() + token.size()) {
+            return std::unexpected("invalid offset: " + std::string(token));
+        }
+
+        offsets.push_back(value);
+
+        if (comma == std::string_view::npos) break;
+        cursor = comma + 1;
+    }
+
+    return offsets;
+}
+
 static void usage(const char* prog) {
     std::cerr << "Usage: " << prog << "\n"
               << "  --env        <name>          environment (e.g. cpp, python-ml)\n"
               << "  --source     <path>          source file\n"
               << "  --input      <path>          concatenated input file\n"
               << "  --output     <path>          concatenated expected output file\n"
+              << "  --in-offsets <csv>           optional input slice offsets\n"
+              << "  --out-offsets <csv>          optional output slice offsets\n"
               << "  --env-dir    <path>          directory containing *.json env configs\n"
               << "  --threads    <N>             worker threads (default: 4)\n"
               << "  --verbose                    enable debug logging\n";
@@ -122,8 +163,42 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    std::optional<std::vector<size_t>> input_offsets;
+    std::optional<std::vector<size_t>> output_offsets;
+    const bool has_input_offsets = args.count("in-offsets");
+    const bool has_output_offsets = args.count("out-offsets");
+
+    if (has_input_offsets != has_output_offsets) {
+        std::cerr << "both --in-offsets and --out-offsets must be provided together\n";
+        return 2;
+    }
+
+    if (has_input_offsets) {
+        auto parsed_input_offsets = parse_offsets_csv(args["in-offsets"]);
+        if (!parsed_input_offsets) {
+            std::cerr << "failed to parse --in-offsets: "
+                      << parsed_input_offsets.error() << "\n";
+            return 2;
+        }
+
+        auto parsed_output_offsets = parse_offsets_csv(args["out-offsets"]);
+        if (!parsed_output_offsets) {
+            std::cerr << "failed to parse --out-offsets: "
+                      << parsed_output_offsets.error() << "\n";
+            return 2;
+        }
+
+        input_offsets = std::move(*parsed_input_offsets);
+        output_offsets = std::move(*parsed_output_offsets);
+    }
+
     /* Split test cases from input/output files. */
-    auto cases_result = split(args["input"], args["output"]);
+    auto cases_result = split(
+        args["input"],
+        args["output"],
+        input_offsets,
+        output_offsets
+    );
     if (!cases_result) {
         std::cerr << "failed to split test cases: "
                   << strerror(cases_result.error()) << "\n";
@@ -133,10 +208,11 @@ int main(int argc, char** argv) {
 
     /* Ensure sandbox root exists. */
     const auto cgroup_root_path = cgroup_root();
+    const auto sandbox_root_path = sandbox_root();
     std::error_code ec;
-    std::filesystem::create_directories(SANDBOX_ROOT, ec);
+    std::filesystem::create_directories(sandbox_root_path, ec);
     if (ec) {
-        std::cerr << "failed to create sandbox root " << SANDBOX_ROOT
+        std::cerr << "failed to create sandbox root " << sandbox_root_path
                   << ": " << ec.message() << "\n";
         return 2;
     }

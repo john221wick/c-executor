@@ -2,7 +2,7 @@
   "name": "python-base",
   "rootfs": "../../test/rootfs/python-base",
   "compile": null,
-  "run": ["/usr/bin/python3", "-S", "{source}"],
+  "run": ["../../test/venvs/python-base/bin/python", "-S", "{source}"],
   "extension": ".py",
   "limits": {
     "memory_mb": 256,

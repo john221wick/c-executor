@@ -18,6 +18,7 @@
 #include "logger.h"
 #include <cerrno>
 #include <cstring>
+#include <unordered_map>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
@@ -32,6 +33,22 @@ uint64_t Clock::now_ns() {
     return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL
            + static_cast<uint64_t>(ts.tv_nsec);
 }
+
+namespace {
+
+constexpr long kPtraceOptions =
+    PTRACE_O_TRACESYSGOOD |
+    PTRACE_O_EXITKILL     |
+    PTRACE_O_TRACECLONE   |
+    PTRACE_O_TRACEFORK    |
+    PTRACE_O_TRACEVFORK;
+
+struct ThreadTraceState {
+    bool         in_syscall = false;
+    SyscallEvent pending_event{};
+};
+
+} // namespace
 
 /* ── Syscall name table ─────────────────────────────────────────────────── */
 
@@ -338,6 +355,31 @@ PtraceTracer::PtraceTracer(pid_t child, TracerPolicy* policy,
 std::expected<ExecutionRecord, int> PtraceTracer::run() {
     ExecutionRecord record;
     record.set_start(Clock::now_ns());
+    tracees_.clear();
+    tracees_.insert(child_);
+    std::unordered_map<pid_t, ThreadTraceState> thread_states;
+    thread_states.try_emplace(child_);
+
+    auto cleanup_tracees = [&]() {
+        std::vector<pid_t> pending(tracees_.begin(), tracees_.end());
+        for (pid_t pid : pending) {
+            if (pid > 0) kill(pid, SIGKILL);
+        }
+
+        while (!tracees_.empty()) {
+            int status = 0;
+            pid_t reaped = waitpid(-1, &status, __WALL);
+            if (reaped < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            tracees_.erase(reaped);
+        }
+
+        thread_states.clear();
+        tracees_.clear();
+        attached_ = false;
+    };
 
     /* Wait for the child's initial SIGSTOP (raised after PTRACE_TRACEME). */
     int wstatus = 0;
@@ -347,67 +389,113 @@ std::expected<ExecutionRecord, int> PtraceTracer::run() {
     }
 
     /* Enable syscall tracking, clone/fork tracing, and the EXITKILL failsafe. */
-    ptrace(PTRACE_SETOPTIONS, child_, 0,
-           PTRACE_O_TRACESYSGOOD |
-           PTRACE_O_EXITKILL     |
-           PTRACE_O_TRACECLONE   |
-           PTRACE_O_TRACEFORK    |
-           PTRACE_O_TRACEVFORK);
+    if (ptrace(PTRACE_SETOPTIONS, child_, 0, kPtraceOptions) < 0)
+        return std::unexpected(errno);
 
-    ptrace(PTRACE_SYSCALL, child_, 0, 0);
+    if (ptrace(PTRACE_SYSCALL, child_, 0, 0) < 0)
+        return std::unexpected(errno);
 
-    bool    in_syscall = false;
     uint64_t seq       = 0;
-    SyscallEvent pending_event{};
+    int leader_exit_code = -1;
+    int leader_exit_signal = 0;
+    bool leader_exited = false;
 
     while (true) {
-        if (waitpid(child_, &wstatus, 0) < 0) {
+        uint64_t now = Clock::now_ns();
+        if (now - record.wall_start_ns > wall_timeout_ns_) {
+            cleanup_tracees();
             record.set_end(Clock::now_ns());
             record.set_exit_status(-1, SIGKILL);
             return record;
         }
 
-        uint64_t now = Clock::now_ns();
+        pid_t stopped_pid = waitpid(-1, &wstatus, __WALL | WNOHANG);
+        if (stopped_pid < 0) {
+            if (errno == EINTR) continue;
 
-        if (WIFEXITED(wstatus)) {
-            record.set_end(now);
-            record.set_exit_status(WEXITSTATUS(wstatus), 0);
+            record.set_end(Clock::now_ns());
+            if (leader_exited) {
+                record.set_exit_status(leader_exit_code, leader_exit_signal);
+            } else {
+                record.set_exit_status(-1, SIGKILL);
+            }
+            tracees_.clear();
+            thread_states.clear();
             attached_ = false;
             return record;
+        }
+
+        if (stopped_pid == 0) {
+            usleep(1000);
+            continue;
+        }
+
+        if (WIFEXITED(wstatus)) {
+            tracees_.erase(stopped_pid);
+            thread_states.erase(stopped_pid);
+
+            if (stopped_pid == child_) {
+                leader_exit_code = WEXITSTATUS(wstatus);
+                leader_exit_signal = 0;
+                leader_exited = true;
+            }
+
+            if (tracees_.empty()) {
+                record.set_end(now);
+                record.set_exit_status(leader_exited ? leader_exit_code : WEXITSTATUS(wstatus),
+                                       leader_exited ? leader_exit_signal : 0);
+                attached_ = false;
+                return record;
+            }
+
+            continue;
         }
 
         if (WIFSIGNALED(wstatus)) {
-            record.set_end(now);
-            record.set_exit_status(-1, WTERMSIG(wstatus));
-            attached_ = false;
-            return record;
+            tracees_.erase(stopped_pid);
+            thread_states.erase(stopped_pid);
+
+            if (stopped_pid == child_) {
+                leader_exit_code = -1;
+                leader_exit_signal = WTERMSIG(wstatus);
+                leader_exited = true;
+            }
+
+            if (tracees_.empty()) {
+                record.set_end(now);
+                record.set_exit_status(leader_exited ? leader_exit_code : -1,
+                                       leader_exited ? leader_exit_signal : WTERMSIG(wstatus));
+                attached_ = false;
+                return record;
+            }
+
+            continue;
         }
 
         if (!WIFSTOPPED(wstatus)) {
-            ptrace(PTRACE_SYSCALL, child_, 0, 0);
+            ptrace(PTRACE_SYSCALL, stopped_pid, 0, 0);
             continue;
         }
 
         int sig = WSTOPSIG(wstatus);
+        auto& state = thread_states.try_emplace(stopped_pid).first->second;
 
         /* Syscall entry or exit: SIGTRAP | 0x80 (from TRACESYSGOOD). */
         if (sig == (SIGTRAP | 0x80)) {
             user_regs_struct regs{};
-            ptrace(PTRACE_GETREGS, child_, 0, &regs);
+            ptrace(PTRACE_GETREGS, stopped_pid, 0, &regs);
 
-            if (!in_syscall) {
+            if (!state.in_syscall) {
                 /* Entry */
                 auto args = SyscallArgs::from_entry(regs);
-                pending_event = SyscallEvent::begin(seq++, args, now, child_);
+                state.pending_event = SyscallEvent::begin(seq++, args, now, stopped_pid);
 
-                PolicyDecision decision = policy_->on_entry(pending_event);
+                PolicyDecision decision = policy_->on_entry(state.pending_event);
 
                 if (decision == PolicyDecision::KILL) {
-                    kill(child_, SIGKILL);
-                    waitpid(child_, nullptr, 0);
+                    cleanup_tracees();
                     record.set_end(Clock::now_ns());
                     record.set_exit_status(-1, SIGKILL);
-                    attached_ = false;
                     return record;
                 }
 
@@ -415,50 +503,58 @@ std::expected<ExecutionRecord, int> PtraceTracer::run() {
                     /* Overwrite orig_rax with -1 so the kernel returns ENOSYS,
                      * then we'll inject -EPERM on the exit stop. */
                     regs.orig_rax = static_cast<unsigned long long>(-1);
-                    ptrace(PTRACE_SETREGS, child_, 0, &regs);
-                    pending_event.denied = true;
+                    ptrace(PTRACE_SETREGS, stopped_pid, 0, &regs);
+                    state.pending_event.denied = true;
                 }
 
-                in_syscall = true;
+                state.in_syscall = true;
             } else {
                 /* Exit */
                 long ret = SyscallArgs::ret_from_regs(regs);
 
-                if (pending_event.denied) {
+                if (state.pending_event.denied) {
                     /* Inject -EPERM as the return value. */
                     regs.rax = static_cast<unsigned long long>(-EPERM);
-                    ptrace(PTRACE_SETREGS, child_, 0, &regs);
+                    ptrace(PTRACE_SETREGS, stopped_pid, 0, &regs);
                     ret = -EPERM;
                 }
 
-                pending_event.complete(ret, now);
-                policy_->on_exit(pending_event);
-                record.add_event(std::move(pending_event));
-                in_syscall = false;
+                state.pending_event.complete(ret, now);
+                policy_->on_exit(state.pending_event);
+                record.add_event(std::move(state.pending_event));
+                state.in_syscall = false;
+            }
+        } else if (sig == SIGTRAP) {
+            int event = wstatus >> 16;
+            if (event == PTRACE_EVENT_CLONE ||
+                    event == PTRACE_EVENT_FORK ||
+                    event == PTRACE_EVENT_VFORK) {
+                unsigned long new_pid_raw = 0;
+                if (ptrace(PTRACE_GETEVENTMSG, stopped_pid, 0, &new_pid_raw) == 0) {
+                    pid_t new_pid = static_cast<pid_t>(new_pid_raw);
+                    if (new_pid > 0) {
+                        tracees_.insert(new_pid);
+                        thread_states.try_emplace(new_pid);
+                        ptrace(PTRACE_SETOPTIONS, new_pid, 0, kPtraceOptions);
+                        ptrace(PTRACE_SYSCALL, new_pid, 0, 0);
+                    }
+                }
             }
         } else {
             /* Non-syscall stop: re-inject the signal to the child. */
             int inject = (sig == SIGTRAP) ? 0 : sig;
-            ptrace(PTRACE_SYSCALL, child_, 0, inject);
+            ptrace(PTRACE_SYSCALL, stopped_pid, 0, inject);
             continue;
         }
 
-        /* Wall timeout check. */
-        if (now - record.wall_start_ns > wall_timeout_ns_) {
-            kill(child_, SIGKILL);
-            waitpid(child_, nullptr, 0);
-            record.set_end(Clock::now_ns());
-            record.set_exit_status(-1, SIGKILL);
-            attached_ = false;
-            return record;
-        }
-
-        ptrace(PTRACE_SYSCALL, child_, 0, 0);
+        ptrace(PTRACE_SYSCALL, stopped_pid, 0, 0);
     }
 }
 
 PtraceTracer::~PtraceTracer() {
     if (attached_) {
-        ptrace(PTRACE_DETACH, child_, 0, 0);
+        for (pid_t pid : tracees_) {
+            ptrace(PTRACE_DETACH, pid, 0, 0);
+        }
     }
 }

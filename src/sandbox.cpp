@@ -400,6 +400,8 @@ std::vector<LandlockRule> build_landlock_rules(const Environment& env,
 
     add(work_dir.c_str(), true,  true,  true);
     add("/tmp",           true,  true,  false);
+    add("/usr/bin",       true,  false, true);
+    add("/usr/local/bin", true,  false, true);
     add("/usr/lib",       true,  false, true);
     add("/lib",           true,  false, true);
     add("/lib64",         true,  false, true);
@@ -412,6 +414,21 @@ std::vector<LandlockRule> build_landlock_rules(const Environment& env,
     for (const auto& mount : env.read_only_mounts) {
         const auto& path = host_fs_mode ? mount.source_path : mount.target_path;
         add(path.c_str(), true, false, true);
+    }
+
+    if (host_fs_mode && !env.run_cmd.empty()) {
+        const std::filesystem::path runtime_path(env.run_cmd.front());
+        if (runtime_path.is_absolute()) {
+            const auto runtime_dir = runtime_path.parent_path();
+            if (!runtime_dir.empty()) {
+                add(runtime_dir.string().c_str(), true, false, true);
+            }
+
+            const auto runtime_root = runtime_dir.parent_path();
+            if (!runtime_root.empty()) {
+                add(runtime_root.string().c_str(), true, false, true);
+            }
+        }
     }
 
     if (env.gpu) {
@@ -436,8 +453,8 @@ int setup_child_rootfs(const Environment& env, const std::string& work_dir) {
 
     /* Create per-sandbox directories: upper (writable layer) and
      * overlay_work (kernel bookkeeping) under a tmpfs. */
-    std::string sandbox_dir = std::string(SANDBOX_ROOT) + "/rootfs_" +
-                               std::to_string(getpid());
+    std::string sandbox_dir = sandbox_root() + "/rootfs_" +
+                              std::to_string(getpid());
     mkdir(sandbox_dir.c_str(), 0755);
 
     std::string upper   = sandbox_dir + "/upper";
