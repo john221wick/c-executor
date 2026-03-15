@@ -2,7 +2,7 @@
   "name": "python-ml",
   "rootfs": "../../test/rootfs/python-ml",
   "compile": null,
-  "run": ["/usr/bin/python3", "-S", "{source}"],
+  "run": ["/test/venvs/python-ml/bin/python", "{source}"],
   "extension": ".py",
   "limits": {
     "memory_mb": 2048,
@@ -10,6 +10,12 @@
     "wall_time_ms": 60000,
     "max_pids": 32
   },
+  "read_only_mounts": [
+    {
+      "source": "../../test/venvs/python-ml",
+      "target": "/test/venvs/python-ml"
+    }
+  ],
   "network": false,
   "gpu": true
 }

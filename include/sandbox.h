@@ -66,6 +66,8 @@ private:
  */
 class NamespaceGuard : public NonCopyable, public NonMovable {
 public:
+    explicit NamespaceGuard(pid_t pid) : pid_(pid) {}
+
     /* child_fn: int fn(void* arg). Clone stack is thread_local inside create(). */
     static std::expected<NamespaceGuard, int> create(int (*child_fn)(void*),
                                                       void* arg,
@@ -86,7 +88,6 @@ public:
     ~NamespaceGuard();
 
 private:
-    explicit NamespaceGuard(pid_t pid) : pid_(pid) {}
     pid_t pid_    = -1;
     bool  reaped_ = false;
 };
@@ -124,7 +125,8 @@ int clone_flags_for(const Environment& env);
  * Always allows access to work_dir, /tmp, standard lib paths, /dev, /proc.
  * Adds /usr/local/cuda when env.gpu is true. */
 std::vector<LandlockRule> build_landlock_rules(const Environment& env,
-                                                const std::string& work_dir);
+                                                const std::string& work_dir,
+                                                bool host_fs_mode = false);
 
 /* Called INSIDE the child after clone(CLONE_NEWNS), before execve.
  * Mounts an overlay over env.rootfs_path with a tmpfs upper layer,

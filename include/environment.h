@@ -22,6 +22,11 @@
 #include <unordered_map>
 #include <vector>
 
+struct ReadOnlyMount {
+    std::string source_path; /* host path */
+    std::string target_path; /* absolute path inside sandbox */
+};
+
 struct Environment {
     std::string              name;
     std::string              rootfs_path;
@@ -29,6 +34,7 @@ struct Environment {
     std::vector<std::string> run_cmd;
     std::string              extension;   /* ".cpp", ".py", ".js", etc. */
     ResourceLimits           limits;
+    std::vector<ReadOnlyMount> read_only_mounts;
     bool                     network = false;
     bool                     gpu     = false;
 

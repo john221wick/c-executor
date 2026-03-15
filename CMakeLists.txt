@@ -13,16 +13,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ── Dependencies ──────────────────────────────────────────────────────────
 
-include(FetchContent)
-
-# nlohmann/json — header-only, used only in environment.cpp
-FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG        v3.11.3
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(nlohmann_json)
+# nlohmann/json — header-only, provided by the system package
+# `nlohmann-json3-dev` on Debian/Ubuntu.
+find_package(nlohmann_json 3.11.3 CONFIG QUIET)
+if(NOT nlohmann_json_FOUND)
+    message(FATAL_ERROR
+        "Missing nlohmann_json 3.11.3+. Install `nlohmann-json3-dev` "
+        "or set `nlohmann_json_DIR` to its CMake package directory."
+    )
+endif()
 
 # libseccomp — system package: apt install libseccomp-dev
 find_library(SECCOMP_LIB seccomp REQUIRED)

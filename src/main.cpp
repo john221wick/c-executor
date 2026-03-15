@@ -9,8 +9,6 @@
  *   --source       path to the source file
  *   --input        path to the concatenated input file
  *   --output       path to the concatenated expected output file
- *   --in-offsets   comma-separated byte offsets for input test cases
- *   --out-offsets  comma-separated byte offsets for output test cases
  *   --env-dir      directory containing *.json environment configs
  *   --threads      number of worker threads (default: 4)
  *   --verbose      enable DEBUG logging
@@ -21,6 +19,7 @@
 #include "common.h"
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -35,29 +34,50 @@
 static std::unordered_map<std::string, std::string>
 parse_args(int argc, char** argv) {
     std::unordered_map<std::string, std::string> args;
-    for (int i = 1; i < argc - 1; i += 2) {
-        std::string key = argv[i];
-        if (key.starts_with("--")) {
-            args[key.substr(2)] = argv[i + 1];
-        }
-    }
-    /* Boolean flags (no value). */
     for (int i = 1; i < argc; ++i) {
         std::string key = argv[i];
-        if (key == "--verbose") args["verbose"] = "1";
+        if (!key.starts_with("--")) continue;
+
+        if (key == "--verbose") {
+            args["verbose"] = "1";
+        } else if (i + 1 < argc) {
+            args[key.substr(2)] = argv[i + 1];
+            ++i;
+        }
     }
     return args;
 }
 
-static std::vector<size_t> parse_offsets(const std::string& s) {
-    std::vector<size_t> offsets;
-    std::istringstream ss(s);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-        if (!token.empty())
-            offsets.push_back(std::stoull(token));
+static bool enable_cgroup_controllers(const std::filesystem::path& root_path,
+                                      std::string& error) {
+    std::ifstream controllers_file(root_path / "cgroup.controllers");
+    if (!controllers_file) {
+        error = "cannot read " + (root_path / "cgroup.controllers").string();
+        return false;
     }
-    return offsets;
+
+    std::string controller;
+    std::string value;
+    while (controllers_file >> controller) {
+        if (!value.empty()) value += ' ';
+        value += '+' + controller;
+    }
+
+    if (value.empty()) return true;
+
+    std::ofstream subtree_file(root_path / "cgroup.subtree_control");
+    if (!subtree_file) {
+        error = "cannot open " + (root_path / "cgroup.subtree_control").string();
+        return false;
+    }
+
+    subtree_file << value;
+    if (!subtree_file) {
+        error = "cannot write " + (root_path / "cgroup.subtree_control").string();
+        return false;
+    }
+
+    return true;
 }
 
 static void usage(const char* prog) {
@@ -66,8 +86,6 @@ static void usage(const char* prog) {
               << "  --source     <path>          source file\n"
               << "  --input      <path>          concatenated input file\n"
               << "  --output     <path>          concatenated expected output file\n"
-              << "  --in-offsets <0,N,...>       byte offsets for input test cases\n"
-              << "  --out-offsets <0,N,...>      byte offsets for output test cases\n"
               << "  --env-dir    <path>          directory containing *.json env configs\n"
               << "  --threads    <N>             worker threads (default: 4)\n"
               << "  --verbose                    enable debug logging\n";
@@ -82,8 +100,7 @@ int main(int argc, char** argv) {
         Logger::instance().set_level(LogLevel::DEBUG);
 
     /* Validate required arguments. */
-    for (const char* key : {"env", "source", "input", "output",
-                             "in-offsets", "out-offsets", "env-dir"}) {
+    for (const char* key : {"env", "source", "input", "output", "env-dir"}) {
         if (!args.count(key)) {
             std::cerr << "missing --" << key << "\n";
             usage(argv[0]);
@@ -105,12 +122,8 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    /* Split test cases from mmap'd files. */
-    auto in_offsets  = parse_offsets(args["in-offsets"]);
-    auto out_offsets = parse_offsets(args["out-offsets"]);
-
-    auto cases_result = split(args["input"], args["output"],
-                               in_offsets, out_offsets);
+    /* Split test cases from input/output files. */
+    auto cases_result = split(args["input"], args["output"]);
     if (!cases_result) {
         std::cerr << "failed to split test cases: "
                   << strerror(cases_result.error()) << "\n";
@@ -119,8 +132,32 @@ int main(int argc, char** argv) {
     const auto& test_cases = *cases_result;
 
     /* Ensure sandbox root exists. */
-    std::filesystem::create_directories(SANDBOX_ROOT);
-    std::filesystem::create_directories(CGROUP_ROOT);
+    const auto cgroup_root_path = cgroup_root();
+    std::error_code ec;
+    std::filesystem::create_directories(SANDBOX_ROOT, ec);
+    if (ec) {
+        std::cerr << "failed to create sandbox root " << SANDBOX_ROOT
+                  << ": " << ec.message() << "\n";
+        return 2;
+    }
+
+    ec.clear();
+    std::filesystem::create_directories(cgroup_root_path, ec);
+    if (ec) {
+        std::cerr << "failed to create cgroup root " << cgroup_root_path
+                  << ": " << ec.message() << "\n"
+                  << "create it manually after build and before running "
+                     "c-executor, or set EXECUTOR_CGROUP_ROOT to a writable "
+                     "delegated cgroup path\n";
+        return 2;
+    }
+
+    std::string cgroup_error;
+    if (!enable_cgroup_controllers(cgroup_root_path, cgroup_error)) {
+        std::cerr << "failed to enable cgroup controllers in "
+                  << cgroup_root_path << ": " << cgroup_error << "\n";
+        return 2;
+    }
 
     /* Run. */
     int threads = args.count("threads") ? std::stoi(args["threads"])

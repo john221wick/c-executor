@@ -1,10 +1,9 @@
 /*
  * io.h — Test case splitting and output comparison.
  *
- * split() mmap's the input and expected-output files and slices them into
- * string_views using caller-provided byte offset vectors. Zero-copy: the
- * returned TestCase views point directly into mmap'd pages. The mappings are
- * kept alive in static storage inside io.cpp for the duration of the process.
+ * split() loads the full input and expected-output files and returns them as
+ * one combined testcase. This matches Codeforces-style batches where the
+ * program itself reads the testcase count from stdin.
  *
  * compare() does a normalized comparison of actual vs expected output,
  * trimming trailing whitespace before comparing. Returns AC or WA; on WA,
@@ -17,22 +16,16 @@
 #include <string>
 #include <vector>
 
-/* Split mmap'd files into TestCase views.
- *
- * input_offsets[i]  = byte offset in input_path  where test case i begins.
- * output_offsets[i] = byte offset in output_path where test case i begins.
- * The last slice in each file extends from offsets.back() to EOF.
- *
- * Returns EINVAL if the vectors are empty or have different sizes. */
+/* Load the full input and expected-output files as one combined testcase. */
 std::expected<std::vector<TestCase>, int>
-split(const std::string&         input_path,
-      const std::string&         output_path,
-      const std::vector<size_t>& input_offsets,
-      const std::vector<size_t>& output_offsets);
+split(const std::string& input_path,
+      const std::string& output_path);
 
 /* Compare actual stdout against expected output.
  * Trailing whitespace/newlines are stripped from both sides before comparing.
- * diff_snippet is populated on WA with context around the first mismatch. */
+ * For combined batch runs, this tries to infer the failing internal testcase
+ * from the input/expected-output structure and reports it in diff_snippet. */
 VerdictType compare(std::string_view actual,
+                    std::string_view input,
                     std::string_view expected,
                     std::string&     diff_snippet);

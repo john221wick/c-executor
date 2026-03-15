@@ -1,7 +1,7 @@
 /*
  * environment.cpp — JSON parsing and registry population.
  *
- * Uses nlohmann/json (pulled in via CMake FetchContent).
+ * Uses nlohmann/json from the system package.
  * Each JSON file maps 1-to-1 with one Environment struct.
  *
  * Placeholder substitution: {source} and {output} are replaced with real
@@ -10,10 +10,18 @@
 #include "environment.h"
 #include "logger.h"
 #include <nlohmann/json.hpp>
-#include <fstream>
 #include <cerrno>
+#include <fstream>
 
 using json = nlohmann::json;
+
+static std::filesystem::path resolve_path(
+        const std::filesystem::path& base_dir,
+        const std::string& raw_path) {
+    std::filesystem::path path(raw_path);
+    if (path.is_absolute()) return path.lexically_normal();
+    return (base_dir / path).lexically_normal();
+}
 
 /* Replace all occurrences of `token` in each element of `vec` with `value`. */
 static std::vector<std::string> substitute(std::vector<std::string> vec,
@@ -60,8 +68,10 @@ static bool parse_environment(const std::filesystem::path& path,
     }
 
     try {
+        const auto base_dir = path.parent_path();
+
         out.name        = j.at("name").get<std::string>();
-        out.rootfs_path = j.at("rootfs").get<std::string>();
+        out.rootfs_path = resolve_path(base_dir, j.at("rootfs").get<std::string>()).string();
         out.extension   = j.at("extension").get<std::string>();
         out.network     = j.value("network", false);
         out.gpu         = j.value("gpu", false);
@@ -77,6 +87,28 @@ static bool parse_environment(const std::filesystem::path& path,
         out.limits.cpu_time_ms  = lim.value("cpu_time_ms",  2000ULL);
         out.limits.wall_time_ms = lim.value("wall_time_ms", 10000ULL);
         out.limits.max_pids     = lim.value("max_pids",     4U);
+
+        if (const auto mounts_it = j.find("read_only_mounts");
+                mounts_it != j.end() && mounts_it->is_array()) {
+            out.read_only_mounts.clear();
+            for (const auto& mount : *mounts_it) {
+                ReadOnlyMount entry{
+                    .source_path = resolve_path(
+                        base_dir, mount.at("source").get<std::string>()
+                    ).string(),
+                    .target_path = std::filesystem::path(
+                        mount.at("target").get<std::string>()
+                    ).lexically_normal().string(),
+                };
+                if (entry.target_path.empty() || entry.target_path.front() != '/') {
+                    Logger::instance().error(
+                        "read_only_mount target must be absolute in " + path.string()
+                    );
+                    return false;
+                }
+                out.read_only_mounts.push_back(std::move(entry));
+            }
+        }
 
     } catch (const json::exception& e) {
         Logger::instance().error("missing field in " + path.string()

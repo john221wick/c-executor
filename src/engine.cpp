@@ -18,6 +18,7 @@
 #include "common.h"
 #include <atomic>
 #include <condition_variable>
+#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <queue>
@@ -94,10 +95,15 @@ public:
                 if (result) {
                     verdicts.push_back(std::move(*result));
                 } else {
+                    Logger::instance().error(
+                        "worker failed for test " + std::to_string(tc->id) +
+                        ": " + std::strerror(result.error())
+                    );
                     verdicts.push_back(TestCaseVerdict{
                         .test_id     = tc->id,
                         .verdict     = VerdictType::INTERNAL_ERROR,
                         .exec_result = {},
+                        .diff_snippet = {},
                     });
                 }
             }
@@ -175,7 +181,9 @@ private:
         out.reserve(cases.size());
         for (const auto& tc : cases)
             out.push_back(TestCaseVerdict{.test_id = tc.id,
-                                          .verdict  = VerdictType::CE});
+                                          .verdict = VerdictType::CE,
+                                          .exec_result = {},
+                                          .diff_snippet = {}});
         return out;
     }
 };

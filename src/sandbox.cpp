@@ -16,8 +16,10 @@
 #include <cassert>
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <utility>
 #include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
@@ -84,11 +86,96 @@ static std::string read_file(const std::string& path) {
              : std::string{};
 }
 
+static int bind_mount_path(const std::string& source,
+                            const std::string& target,
+                            bool readonly) {
+    namespace fs = std::filesystem;
+
+    std::error_code ec;
+    const fs::path source_path(source);
+    const fs::path target_path(target);
+
+    if (!fs::exists(source_path, ec)) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    fs::create_directories(target_path.parent_path(), ec);
+    if (ec) {
+        errno = ec.value();
+        return -1;
+    }
+
+    const bool is_dir = fs::is_directory(source_path, ec);
+    if (ec) {
+        errno = ec.value();
+        return -1;
+    }
+
+    if (is_dir) {
+        fs::create_directories(target_path, ec);
+        if (ec) {
+            errno = ec.value();
+            return -1;
+        }
+    } else {
+        int fd = open(target.c_str(), O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
+        if (fd < 0) return -1;
+        close(fd);
+    }
+
+    unsigned long bind_flags = MS_BIND | (is_dir ? MS_REC : 0);
+    if (mount(source.c_str(), target.c_str(), nullptr, bind_flags, nullptr) < 0)
+        return -1;
+
+    if (readonly) {
+        unsigned long remount_flags =
+            MS_BIND | MS_REMOUNT | MS_RDONLY | (is_dir ? MS_REC : 0);
+        if (mount(nullptr, target.c_str(), nullptr, remount_flags, nullptr) < 0)
+            return -1;
+    }
+
+    return 0;
+}
+
+static int mount_rootfs(const Environment& env,
+                         const std::string& upper,
+                         const std::string& ovlwork,
+                         const std::string& merged) {
+    std::string opts = "lowerdir=" + env.rootfs_path +
+                       ",upperdir=" + upper +
+                       ",workdir="  + ovlwork;
+
+    if (mount("overlay", merged.c_str(), "overlay", 0, opts.c_str()) == 0)
+        return 0;
+
+    const int overlay_errno = errno;
+    if (overlay_errno != EPERM && overlay_errno != EOPNOTSUPP &&
+            overlay_errno != ENODEV) {
+        errno = overlay_errno;
+        return -1;
+    }
+
+    Logger::instance().warn(
+        "overlay mount unavailable, falling back to read-only bind rootfs"
+    );
+
+    if (mount(env.rootfs_path.c_str(), merged.c_str(), nullptr,
+              MS_BIND | MS_REC, nullptr) < 0)
+        return -1;
+
+    if (mount(nullptr, merged.c_str(), nullptr,
+              MS_BIND | MS_REMOUNT | MS_RDONLY | MS_REC, nullptr) < 0)
+        return -1;
+
+    return 0;
+}
+
 /* ── CgroupGuard ────────────────────────────────────────────────────────── */
 
 std::expected<CgroupGuard, int> CgroupGuard::create(const std::string& name,
                                                       const ResourceLimits& limits) {
-    std::string path = std::string(CGROUP_ROOT) + "/" + name;
+    std::string path = cgroup_root() + "/" + name;
 
     if (mkdir(path.c_str(), 0755) < 0 && errno != EEXIST)
         return std::unexpected(errno);
@@ -168,7 +255,7 @@ std::expected<NamespaceGuard, int> NamespaceGuard::create(
     pid_t pid = clone(child_fn, stack_top, clone_flags, arg);
     if (pid < 0) return std::unexpected(errno);
 
-    return NamespaceGuard{pid};
+    return std::expected<NamespaceGuard, int>(std::in_place, pid);
 }
 
 std::expected<void, int> NamespaceGuard::write_uid_gid_mappings() const {
@@ -303,7 +390,8 @@ int clone_flags_for(const Environment& env) {
 /* ── build_landlock_rules ───────────────────────────────────────────────── */
 
 std::vector<LandlockRule> build_landlock_rules(const Environment& env,
-                                                const std::string& work_dir) {
+                                                const std::string& work_dir,
+                                                bool host_fs_mode) {
     std::vector<LandlockRule> rules;
 
     auto add = [&](const char* path, bool r, bool w, bool x) {
@@ -321,6 +409,11 @@ std::vector<LandlockRule> build_landlock_rules(const Environment& env,
     add("/etc/ld.so.cache", true, false, false);
     add("/usr/share/zoneinfo", true, false, false);
 
+    for (const auto& mount : env.read_only_mounts) {
+        const auto& path = host_fs_mode ? mount.source_path : mount.target_path;
+        add(path.c_str(), true, false, true);
+    }
+
     if (env.gpu) {
         add("/usr/local/cuda", true, false, true);
     }
@@ -332,8 +425,14 @@ std::vector<LandlockRule> build_landlock_rules(const Environment& env,
 
 int setup_child_rootfs(const Environment& env, const std::string& work_dir) {
     /* Make everything private so our mounts don't propagate to the host. */
-    if (mount("none", "/", nullptr, MS_REC | MS_PRIVATE, nullptr) < 0)
-        return -1;
+    if (mount("none", "/", nullptr, MS_REC | MS_PRIVATE, nullptr) < 0) {
+        if (errno == EPERM || errno == EACCES) {
+            Logger::instance().warn("mount private / denied; continuing in shared mount mode");
+        } else {
+            Logger::instance().error("mount private / failed: " + std::string(strerror(errno)));
+            return -1;
+        }
+    }
 
     /* Create per-sandbox directories: upper (writable layer) and
      * overlay_work (kernel bookkeeping) under a tmpfs. */
@@ -350,28 +449,40 @@ int setup_child_rootfs(const Environment& env, const std::string& work_dir) {
     mkdir(merged.c_str(),  0755);
 
     /* Mount a tmpfs so upper/ovlwork are in-memory. */
-    if (mount("tmpfs", sandbox_dir.c_str(), "tmpfs", 0, "size=64m") < 0)
+    if (mount("tmpfs", sandbox_dir.c_str(), "tmpfs", 0, "size=64m") < 0) {
+        Logger::instance().error("mount tmpfs sandbox_dir failed: " + std::string(strerror(errno)));
         return -1;
+    }
 
     /* Re-create dirs inside the tmpfs. */
     mkdir(upper.c_str(),   0755);
     mkdir(ovlwork.c_str(), 0755);
     mkdir(merged.c_str(),  0755);
 
-    /* Overlay: lowerdir is the read-only pre-built rootfs. */
-    std::string opts = "lowerdir=" + env.rootfs_path +
-                       ",upperdir=" + upper +
-                       ",workdir="  + ovlwork;
-
-    if (mount("overlay", merged.c_str(), "overlay", 0, opts.c_str()) < 0)
+    if (mount_rootfs(env, upper, ovlwork, merged) < 0) {
+        Logger::instance().error("mount rootfs failed: " + std::string(strerror(errno)));
         return -1;
+    }
 
     /* Bind-mount work_dir into the overlay so the binary is accessible. */
     std::string mnt_work = merged + "/work";
     mkdir(mnt_work.c_str(), 0755);
     if (mount(work_dir.c_str(), mnt_work.c_str(), nullptr,
-              MS_BIND | MS_REC, nullptr) < 0)
+              MS_BIND | MS_REC, nullptr) < 0) {
+        Logger::instance().error("bind mount work dir failed: " + std::string(strerror(errno)));
         return -1;
+    }
+
+    for (const auto& mount_spec : env.read_only_mounts) {
+        std::string dst = merged + mount_spec.target_path;
+        if (bind_mount_path(mount_spec.source_path, dst, true) < 0) {
+            Logger::instance().error(
+                "read-only mount failed for " + mount_spec.source_path + " -> " +
+                mount_spec.target_path + ": " + std::string(strerror(errno))
+            );
+            return -1;
+        }
+    }
 
     /* Standard mounts inside the new root. */
     std::string proc_dir = merged + "/proc";
@@ -379,11 +490,15 @@ int setup_child_rootfs(const Environment& env, const std::string& work_dir) {
     mkdir(proc_dir.c_str(), 0755);
     mkdir(tmp_dir.c_str(),  0755);
 
-    if (mount("proc", proc_dir.c_str(), "proc", 0, nullptr) < 0)
+    if (mount("proc", proc_dir.c_str(), "proc", 0, nullptr) < 0) {
+        Logger::instance().error("mount proc failed: " + std::string(strerror(errno)));
         return -1;
+    }
 
-    if (mount("tmpfs", tmp_dir.c_str(), "tmpfs", 0, "size=64m") < 0)
+    if (mount("tmpfs", tmp_dir.c_str(), "tmpfs", 0, "size=64m") < 0) {
+        Logger::instance().error("mount tmpfs /tmp failed: " + std::string(strerror(errno)));
         return -1;
+    }
 
     /* Bind /dev/null and /dev/urandom. */
     auto bind_dev = [&](const char* dev) {
@@ -407,13 +522,21 @@ int setup_child_rootfs(const Environment& env, const std::string& work_dir) {
     std::string old_root = merged + "/old_root";
     mkdir(old_root.c_str(), 0755);
 
-    if (syscall(SYS_pivot_root, merged.c_str(), old_root.c_str()) < 0)
+    if (syscall(SYS_pivot_root, merged.c_str(), old_root.c_str()) < 0) {
+        Logger::instance().error("pivot_root failed: " + std::string(strerror(errno)));
         return -1;
+    }
 
-    if (chdir("/") < 0) return -1;
+    if (chdir("/") < 0) {
+        Logger::instance().error("chdir / failed: " + std::string(strerror(errno)));
+        return -1;
+    }
 
     /* Unmount the old root so the host filesystem is completely gone. */
-    if (umount2("/old_root", MNT_DETACH) < 0) return -1;
+    if (umount2("/old_root", MNT_DETACH) < 0) {
+        Logger::instance().error("umount old_root failed: " + std::string(strerror(errno)));
+        return -1;
+    }
     rmdir("/old_root");
 
     return 0;

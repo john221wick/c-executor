@@ -12,6 +12,7 @@
  */
 #pragma once
 
+#include <cstdlib>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -110,8 +111,24 @@ struct TestCaseVerdict {
 
 /* ── Process-wide constants ─────────────────────────────────────────────── */
 
-inline constexpr const char* CGROUP_ROOT        = "/sys/fs/cgroup/executor";
+inline constexpr const char* DEFAULT_CGROUP_ROOT = "/sys/fs/cgroup/executor";
 inline constexpr const char* SANDBOX_ROOT       = "/tmp/executor/sandboxes";
 inline constexpr size_t      CLONE_STACK_SIZE   = 1 * 1024 * 1024; /* 1 MB */
 inline constexpr int         DEFAULT_THREADS    = 4;
 inline constexpr size_t      MAX_STDERR_CAPTURE = 4096;
+
+inline std::string cgroup_root() {
+    if (const char* value = std::getenv("EXECUTOR_CGROUP_ROOT");
+            value && *value) {
+        return value;
+    }
+    return DEFAULT_CGROUP_ROOT;
+}
+
+inline bool rootfs_is_disabled() {
+    if (const char* value = std::getenv("EXECUTOR_DISABLE_ROOTFS");
+            value && *value && std::string_view(value) != "0") {
+        return true;
+    }
+    return false;
+}

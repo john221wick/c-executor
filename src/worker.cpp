@@ -39,6 +39,7 @@ struct ChildContext {
     std::string        work_dir;
     std::string        binary_path; /* resolved {output} or {source} */
     std::vector<std::string> argv;  /* run_cmd after substitution */
+    bool               host_fs_mode;
     int                input_fd;
     int                output_fd;
     int                stderr_fd;
@@ -66,6 +67,25 @@ static std::vector<char*> make_argv(const std::vector<std::string>& args) {
     return argv;
 }
 
+static std::vector<std::string> rewrite_mount_targets_to_host(
+        std::vector<std::string> argv,
+        const Environment& env) {
+    for (auto& arg : argv) {
+        for (const auto& mount : env.read_only_mounts) {
+            if (arg == mount.target_path) {
+                arg = mount.source_path;
+                break;
+            }
+            const std::string prefix = mount.target_path + "/";
+            if (arg.starts_with(prefix)) {
+                arg.replace(0, mount.target_path.size(), mount.source_path);
+                break;
+            }
+        }
+    }
+    return argv;
+}
+
 /* ── Child function ─────────────────────────────────────────────────────── */
 
 static int child_fn(void* arg) {
@@ -75,14 +95,20 @@ static int child_fn(void* arg) {
     ptrace(PTRACE_TRACEME, 0, nullptr, nullptr);
     raise(SIGSTOP);
 
-    /* Set up overlay rootfs + pivot_root. */
-    if (setup_child_rootfs(*ctx->env, ctx->work_dir) < 0) {
-        Logger::instance().error("setup_child_rootfs failed");
-        _exit(127);
+    if (!ctx->host_fs_mode) {
+        /* Set up overlay rootfs + pivot_root. */
+        if (setup_child_rootfs(*ctx->env, ctx->work_dir) < 0) {
+            Logger::instance().error("setup_child_rootfs failed");
+            _exit(127);
+        }
     }
 
     /* Landlock: whitelist-only filesystem access. */
-    auto ll_rules = build_landlock_rules(*ctx->env, "/work");
+    auto ll_rules = build_landlock_rules(
+        *ctx->env,
+        ctx->host_fs_mode ? ctx->work_dir : "/work",
+        ctx->host_fs_mode
+    );
     auto ll_guard = LandlockGuard::create(ll_rules);
     if (ll_guard) {
         if (!ll_guard->enforce()) {
@@ -138,7 +164,12 @@ public:
 
         {
             int fd = open(input_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd < 0) return std::unexpected(errno);
+            if (fd < 0) {
+                Logger::instance().error(
+                    "failed to open test input file: " + std::string(strerror(errno))
+                );
+                return std::unexpected(errno);
+            }
             write(fd, tc.input.data(), tc.input.size());
             close(fd);
         }
@@ -152,17 +183,21 @@ public:
             if (out_fd >= 0) close(out_fd);
             if (err_fd >= 0) close(err_fd);
             if (in_fd  >= 0) close(in_fd);
+            Logger::instance().error(
+                "failed to prepare stdio files: " + std::string(strerror(errno))
+            );
             return std::unexpected(errno);
         }
 
         /* 2. Cgroup */
         auto cgroup = CgroupGuard::create("task_" + std::to_string(tc.id), env_.limits);
-        if (!cgroup) { cleanup(work_dir, out_fd, err_fd, in_fd); return std::unexpected(cgroup.error()); }
-
-        /* Resolve binary path and argv. */
-        std::string binary_in_sandbox = "/work/" + fs::path(compiled_exe_).filename().string();
-        auto argv_vec = env_.resolved_run_cmd(binary_in_sandbox, binary_in_sandbox);
-        if (argv_vec.empty()) { cleanup(work_dir, out_fd, err_fd, in_fd); return std::unexpected(EINVAL); }
+        if (!cgroup) {
+            Logger::instance().error(
+                "failed to create cgroup: " + std::string(strerror(cgroup.error()))
+            );
+            cleanup(work_dir, out_fd, err_fd, in_fd);
+            return std::unexpected(cgroup.error());
+        }
 
         /* Copy binary into work dir so it's accessible inside the sandbox. */
         fs::copy_file(compiled_exe_, work_dir + "/" + fs::path(compiled_exe_).filename().string(),
@@ -171,12 +206,27 @@ public:
                         fs::perms::owner_exec | fs::perms::owner_read | fs::perms::group_read,
                         fs::perm_options::add);
 
+        const bool host_fs_mode = rootfs_is_disabled();
+        std::string binary_in_sandbox =
+            host_fs_mode
+                ? (work_dir + "/" + fs::path(compiled_exe_).filename().string())
+                : ("/work/" + fs::path(compiled_exe_).filename().string());
+        auto argv_vec = env_.resolved_run_cmd(binary_in_sandbox, binary_in_sandbox);
+        if (host_fs_mode) {
+            argv_vec = rewrite_mount_targets_to_host(std::move(argv_vec), env_);
+        }
+        if (argv_vec.empty()) {
+            cleanup(work_dir, out_fd, err_fd, in_fd);
+            return std::unexpected(EINVAL);
+        }
+
         /* 3. Clone */
         ChildContext ctx{
             .env         = &env_,
             .work_dir    = work_dir,
             .binary_path = binary_in_sandbox,
             .argv        = argv_vec,
+            .host_fs_mode = host_fs_mode,
             .input_fd    = in_fd,
             .output_fd   = out_fd,
             .stderr_fd   = err_fd,
@@ -184,10 +234,19 @@ public:
 
         int flags = clone_flags_for(env_);
         auto ns   = NamespaceGuard::create(child_fn, &ctx, flags);
-        if (!ns) { cleanup(work_dir, out_fd, err_fd, in_fd); return std::unexpected(ns.error()); }
+        if (!ns) {
+            Logger::instance().error(
+                "clone failed: " + std::string(strerror(ns.error()))
+            );
+            cleanup(work_dir, out_fd, err_fd, in_fd);
+            return std::unexpected(ns.error());
+        }
 
         /* 4. uid/gid maps */
         if (auto r = ns->write_uid_gid_mappings(); !r) {
+            Logger::instance().error(
+                "uid/gid mapping failed: " + std::string(strerror(r.error()))
+            );
             ns->kill();
             cleanup(work_dir, out_fd, err_fd, in_fd);
             return std::unexpected(r.error());
@@ -195,6 +254,9 @@ public:
 
         /* 5. Attach to cgroup */
         if (auto r = cgroup->attach(ns->child_pid()); !r) {
+            Logger::instance().error(
+                "cgroup attach failed: " + std::string(strerror(r.error()))
+            );
             ns->kill();
             cleanup(work_dir, out_fd, err_fd, in_fd);
             return std::unexpected(r.error());
@@ -210,6 +272,9 @@ public:
 
         auto record_result = tracer.run();
         if (!record_result) {
+            Logger::instance().error(
+                "ptrace tracer failed: " + std::string(strerror(record_result.error()))
+            );
             ns->kill();
             fs::remove_all(work_dir);
             return std::unexpected(record_result.error());
@@ -266,7 +331,7 @@ public:
             for (const auto& ev : record.events) if (ev.denied) { any_denied = true; break; }
             verdict = any_denied ? VerdictType::SANDBOX_VIOLATION : VerdictType::RE;
         } else {
-            verdict = compare(actual_output, tc.expected_output, diff_snippet);
+            verdict = compare(actual_output, tc.input, tc.expected_output, diff_snippet);
         }
 
         ExecResult exec_result{
