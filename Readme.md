@@ -50,6 +50,28 @@ Adding a new environment is one JSON file and one rootfs directory. No code chan
 
 ---
 
+## Architecture and flow
+
+The diagrams below use a fixed height so they stay readable and consistent in the README.
+
+### Architecture
+
+<p align="center">
+  <img src="images/architecture.png" alt="cpp-executor architecture diagram" height="420" />
+</p>
+
+### Execution flow
+
+<p align="center">
+  <img src="images/flow.png" alt="cpp-executor execution flow diagram" height="420" />
+</p>
+
+### YouTube explanation
+
+[Watch the architecture and flow walkthrough](https://youtu.be/Y9qiC241oqI)
+
+---
+
 ## Setup
 
 ```bash
